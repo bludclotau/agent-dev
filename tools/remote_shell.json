@@ -1,0 +1,60 @@
+{
+  "name": "remote_shell",
+  "description": "Execute a validated, tiered, audited command on the Proxmox host via the remote_shell.sh gateway. TIER 0 = read-only (always allowed). TIER 1 = state change (logged). TIER 2 = destructive (requires confirmed: true, which you must only set after the user has explicitly approved the action in chat).",
+
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "command": {
+        "type": "string",
+        "description": "Exact command to run. Must match a TIER 0/1/2 pattern inside remote_shell.sh. Use tee or sed -i for file edits — never nano or vi."
+      },
+      "confirmed": {
+        "type": "boolean",
+        "description": "Set true ONLY for TIER 2 destructive commands AND only after the user has confirmed the action by name in Discord. Default false.",
+        "default": false
+      },
+      "target": {
+        "type": "string",
+        "description": "Optional numeric LXC container ID. When set, the command runs inside that container via pct exec passthrough.",
+        "pattern": "^[0-9]+$"
+      }
+    },
+    "required": ["command"]
+  },
+
+  "exec": {
+    "type": "script",
+    "interpreter": "bash",
+    "script": "/opt/snerloc/tools/remote_shell.sh",
+
+    "args_builder": [
+      {
+        "condition": "params.confirmed === true",
+        "prepend": "--confirmed"
+      },
+      {
+        "condition": "params.target !== undefined && params.target !== ''",
+        "prepend": "--target",
+        "value": "{{params.target}}"
+      },
+      {
+        "value": "{{params.command}}"
+      }
+    ],
+
+    "timeout_seconds": 60,
+    "capture": "stdout+stderr",
+
+    "on_error": {
+      "exit_code_2": "TIER 2 command blocked — confirmed flag was not set. Present the command to the user and ask for explicit approval before retrying with confirmed: true.",
+      "exit_code_1": "Command denied by whitelist. Either rephrase using an allowed pattern or report to the user that the operation is not permitted."
+    }
+  },
+
+  "safety": {
+    "never_set_confirmed_automatically": true,
+    "confirmed_requires_user_utterance": true,
+    "note": "The confirmed flag must only be set when the user has said something equivalent to 'yes', 'confirm', 'go ahead', or 'do it' in direct response to you stating the exact destructive command you intend to run."
+  }
+}

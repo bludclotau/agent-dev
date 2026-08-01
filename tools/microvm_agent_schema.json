@@ -1,0 +1,928 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "service": "microvm-agent",
+  "version": "1.0.0",
+  "description": "Complete tool schema for an ephemeral micro-VM agent service. Designed for use by LLM agents to execute code and commands in isolated, nested VM environments.",
+  "defaults": {
+    "cpu": 1,
+    "ram": 1024,
+    "image": "ubuntu-22.04-base",
+    "timeout": 120
+  },
+  "shared_definitions": {
+    "session_id": {
+      "type": "string",
+      "description": "Target an existing named session. If omitted, a fresh ephemeral VM is used and destroyed after execution.",
+      "pattern": "^[a-zA-Z0-9_-]{8,64}$",
+      "examples": ["sess-abc123de", "agent-build-session"]
+    },
+    "idempotency_key": {
+      "type": "string",
+      "description": "If provided, duplicate calls with the same key within the TTL window return the cached result rather than re-executing.",
+      "pattern": "^[a-zA-Z0-9_-]{8,128}$"
+    },
+    "tags": {
+      "type": "object",
+      "description": "Arbitrary key-value labels for filtering, auditing, and garbage collection.",
+      "additionalProperties": { "type": "string" },
+      "examples": [{ "owner": "agent-007", "task": "build", "env": "ci" }]
+    },
+    "cpu": {
+      "type": "integer",
+      "description": "Number of virtual CPUs to allocate.",
+      "default": 1,
+      "minimum": 1,
+      "maximum": 8
+    },
+    "ram": {
+      "type": "integer",
+      "description": "RAM in megabytes.",
+      "default": 1024,
+      "minimum": 256,
+      "maximum": 16384
+    },
+    "image": {
+      "type": "string",
+      "description": "Base image name (without .qcow2 extension). Use microvm_image_list to enumerate available images.",
+      "default": "ubuntu-22.04-base"
+    },
+    "timeout": {
+      "type": "integer",
+      "description": "Seconds to wait for the VM to become SSH-ready.",
+      "default": 120,
+      "minimum": 10,
+      "maximum": 600
+    },
+    "vm_result": {
+      "type": "object",
+      "description": "Standard result envelope returned by execution tools.",
+      "properties": {
+        "vm_id":            { "type": "string",  "description": "Unique identifier of the VM that ran this command." },
+        "session_id":       { "type": ["string", "null"], "description": "Session ID if this was a persistent session call, else null." },
+        "stdout":           { "type": "string",  "description": "Captured standard output from the command." },
+        "stderr":           { "type": "string",  "description": "Captured standard error from the command." },
+        "exit_code":        { "type": "integer", "description": "Exit code returned by the command." },
+        "runtime_seconds":  { "type": "number",  "description": "Wall-clock seconds the command ran." },
+        "logfile":          { "type": "string",  "description": "Host path to the full log for this execution." },
+        "idempotent_hit":   { "type": "boolean", "description": "True if the result was served from the idempotency cache." }
+      },
+      "required": ["vm_id", "stdout", "stderr", "exit_code", "runtime_seconds"]
+    },
+    "error_result": {
+      "type": "object",
+      "properties": {
+        "error":   { "type": "string", "description": "Machine-readable error code (e.g. IMAGE_NOT_FOUND, TIMEOUT, SESSION_NOT_FOUND)." },
+        "message": { "type": "string", "description": "Human-readable error description." },
+        "vm_id":   { "type": ["string", "null"] }
+      },
+      "required": ["error", "message"]
+    }
+  },
+
+  "tools": [
+
+    {
+      "name": "microvm_run",
+      "description": "Execute a single shell command inside a fresh ephemeral micro-VM. The VM is created, the command is run, and the VM is destroyed automatically. Use this for stateless, one-shot execution. For multi-step workflows that need shared state, use microvm_session_create + microvm_session_exec instead.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The shell command to execute inside the micro-VM.",
+            "minLength": 1
+          },
+          "cpu":             { "$ref": "#/shared_definitions/cpu" },
+          "ram":             { "$ref": "#/shared_definitions/ram" },
+          "image":           { "$ref": "#/shared_definitions/image" },
+          "timeout":         { "$ref": "#/shared_definitions/timeout" },
+          "env_vars": {
+            "type": "object",
+            "description": "Environment variables to inject into the VM before running the command.",
+            "additionalProperties": { "type": "string" },
+            "examples": [{ "NODE_ENV": "production", "PORT": "3000" }]
+          },
+          "working_dir": {
+            "type": "string",
+            "description": "Absolute path inside the VM to use as the working directory. Defaults to /home/user.",
+            "default": "/home/user"
+          },
+          "idempotency_key": { "$ref": "#/shared_definitions/idempotency_key" },
+          "tags":            { "$ref": "#/shared_definitions/tags" }
+        },
+        "required": ["command"],
+        "additionalProperties": false
+      },
+      "returns": { "$ref": "#/shared_definitions/vm_result" },
+      "errors":  { "$ref": "#/shared_definitions/error_result" },
+      "examples": [
+        {
+          "description": "Run uname inside a 2-CPU, 2GB VM",
+          "input": { "command": "uname -a", "cpu": 2, "ram": 2048 }
+        },
+        {
+          "description": "Install a package",
+          "input": { "command": "sudo apt-get update && sudo apt-get install -y curl" }
+        },
+        {
+          "description": "Run a command with environment variables",
+          "input": {
+            "command": "printenv APP_ENV && node server.js",
+            "image": "node-20-base",
+            "env_vars": { "APP_ENV": "staging", "PORT": "8080" }
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "microvm_run_script",
+      "description": "Execute a multi-line shell script inside a fresh ephemeral micro-VM. Accepts a script block directly rather than a single shell string, which is safer and more readable for complex workflows. The script is written to a temp file inside the VM and executed with bash.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "script": {
+            "type": "string",
+            "description": "Multi-line bash script to execute. Do not include a shebang line — it is added automatically.",
+            "minLength": 1,
+            "examples": ["apt-get update -y\napt-get install -y git curl\ngit clone https://github.com/user/repo /opt/repo\ncd /opt/repo && npm install && npm test"]
+          },
+          "interpreter": {
+            "type": "string",
+            "description": "Shell interpreter to use for the script.",
+            "default": "bash",
+            "enum": ["bash", "sh", "python3", "python"]
+          },
+          "cpu":             { "$ref": "#/shared_definitions/cpu" },
+          "ram":             { "$ref": "#/shared_definitions/ram" },
+          "image":           { "$ref": "#/shared_definitions/image" },
+          "timeout":         { "$ref": "#/shared_definitions/timeout" },
+          "env_vars": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "working_dir": {
+            "type": "string",
+            "default": "/home/user"
+          },
+          "idempotency_key": { "$ref": "#/shared_definitions/idempotency_key" },
+          "tags":            { "$ref": "#/shared_definitions/tags" }
+        },
+        "required": ["script"],
+        "additionalProperties": false
+      },
+      "returns": { "$ref": "#/shared_definitions/vm_result" },
+      "errors":  { "$ref": "#/shared_definitions/error_result" },
+      "examples": [
+        {
+          "description": "Run a Python test suite from a multi-line script",
+          "input": {
+            "script": "pip install pytest\ncd /opt/project\npytest tests/ -v",
+            "interpreter": "bash",
+            "image": "python-3.12-base",
+            "ram": 2048
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "microvm_session_create",
+      "description": "Boot a persistent micro-VM session and return a session_id. The VM remains running until microvm_session_destroy is called or the idle TTL expires. Use this as the first step in any multi-command workflow to avoid paying the VM boot cost on each step.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "session_name": {
+            "type": "string",
+            "description": "Optional human-readable name for the session. Used in logs and microvm_session_list output. If omitted, a random ID is generated.",
+            "pattern": "^[a-zA-Z0-9_-]{1,64}$"
+          },
+          "cpu":     { "$ref": "#/shared_definitions/cpu" },
+          "ram":     { "$ref": "#/shared_definitions/ram" },
+          "image":   { "$ref": "#/shared_definitions/image" },
+          "timeout": { "$ref": "#/shared_definitions/timeout" },
+          "idle_ttl_seconds": {
+            "type": "integer",
+            "description": "Seconds of inactivity after which the session is automatically destroyed. Resets on each microvm_session_exec call.",
+            "default": 900,
+            "minimum": 60,
+            "maximum": 86400
+          },
+          "env_vars": {
+            "type": "object",
+            "description": "Environment variables to set globally for the session's shell.",
+            "additionalProperties": { "type": "string" }
+          },
+          "tags": { "$ref": "#/shared_definitions/tags" }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "session_id":    { "type": "string",  "description": "Unique session identifier. Pass this to microvm_session_exec and microvm_session_destroy." },
+          "vm_id":         { "type": "string",  "description": "Underlying VM identifier." },
+          "image":         { "type": "string",  "description": "Base image used." },
+          "cpu":           { "type": "integer" },
+          "ram":           { "type": "integer" },
+          "boot_seconds":  { "type": "number",  "description": "Wall-clock seconds the VM took to become SSH-ready." },
+          "idle_ttl_seconds": { "type": "integer" },
+          "expires_at":    { "type": "string",  "format": "date-time", "description": "ISO 8601 timestamp when the session will auto-expire if idle." }
+        },
+        "required": ["session_id", "vm_id", "boot_seconds"]
+      },
+      "errors": { "$ref": "#/shared_definitions/error_result" },
+      "examples": [
+        {
+          "description": "Create a 4-CPU session for a build workflow",
+          "input": { "session_name": "build-agent-01", "cpu": 4, "ram": 4096, "image": "ubuntu-22.04-base", "idle_ttl_seconds": 1800 }
+        }
+      ]
+    },
+
+    {
+      "name": "microvm_session_exec",
+      "description": "Execute a command inside an existing persistent session. The session's filesystem, processes, and environment persist between calls. Returns the same result envelope as microvm_run.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "session_id": { "$ref": "#/shared_definitions/session_id" },
+          "command": {
+            "type": "string",
+            "description": "Shell command to run inside the session.",
+            "minLength": 1
+          },
+          "working_dir": {
+            "type": "string",
+            "description": "Absolute path inside the VM to cd to before running the command.",
+            "default": "/home/user"
+          },
+          "exec_timeout": {
+            "type": "integer",
+            "description": "Seconds to wait for this specific command to complete before returning a TIMEOUT error. Does not destroy the session.",
+            "default": 300,
+            "minimum": 1,
+            "maximum": 3600
+          },
+          "idempotency_key": { "$ref": "#/shared_definitions/idempotency_key" }
+        },
+        "required": ["session_id", "command"],
+        "additionalProperties": false
+      },
+      "returns": { "$ref": "#/shared_definitions/vm_result" },
+      "errors":  { "$ref": "#/shared_definitions/error_result" },
+      "examples": [
+        {
+          "description": "Chain two commands in the same session",
+          "input": { "session_id": "sess-abc123de", "command": "cd /opt/repo && git pull" }
+        },
+        {
+          "description": "Run tests in an already-configured session",
+          "input": { "session_id": "sess-abc123de", "command": "npm test", "working_dir": "/opt/repo", "exec_timeout": 600 }
+        }
+      ]
+    },
+
+    {
+      "name": "microvm_session_destroy",
+      "description": "Explicitly tear down a persistent session and release all associated resources. Always call this when a multi-step workflow is complete to avoid idle resource usage.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "session_id": { "$ref": "#/shared_definitions/session_id" },
+          "force": {
+            "type": "boolean",
+            "description": "If true, destroy the session immediately even if a command is currently running.",
+            "default": false
+          }
+        },
+        "required": ["session_id"],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "session_id":        { "type": "string" },
+          "destroyed":         { "type": "boolean" },
+          "runtime_seconds":   { "type": "number", "description": "Total wall-clock lifetime of the session." },
+          "commands_executed": { "type": "integer" }
+        },
+        "required": ["session_id", "destroyed"]
+      },
+      "errors": { "$ref": "#/shared_definitions/error_result" }
+    },
+
+    {
+      "name": "microvm_session_list",
+      "description": "Return all currently active sessions visible to this agent context, with resource usage and metadata.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tags": {
+            "type": "object",
+            "description": "Filter sessions by tag key-value pairs. Only sessions matching ALL provided tags are returned.",
+            "additionalProperties": { "type": "string" }
+          },
+          "include_expired": {
+            "type": "boolean",
+            "description": "If true, include sessions that have expired but not yet been fully cleaned up.",
+            "default": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "session_id":        { "type": "string" },
+                "session_name":      { "type": ["string", "null"] },
+                "vm_id":             { "type": "string" },
+                "image":             { "type": "string" },
+                "cpu":               { "type": "integer" },
+                "ram":               { "type": "integer" },
+                "status":            { "type": "string", "enum": ["booting", "ready", "busy", "idle", "expired"] },
+                "created_at":        { "type": "string", "format": "date-time" },
+                "expires_at":        { "type": "string", "format": "date-time" },
+                "commands_executed": { "type": "integer" },
+                "cpu_usage_pct":     { "type": "number" },
+                "ram_used_mb":       { "type": "integer" },
+                "disk_used_mb":      { "type": "integer" },
+                "tags":              { "$ref": "#/shared_definitions/tags" }
+              }
+            }
+          },
+          "total": { "type": "integer" }
+        },
+        "required": ["sessions", "total"]
+      }
+    },
+
+    {
+      "name": "microvm_file_write",
+      "description": "Write a string or base64-encoded payload to a path inside a VM or session. Creates parent directories automatically. Use this to inject configuration files, scripts, or data before running a command.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "session_id": { "$ref": "#/shared_definitions/session_id" },
+          "vm_id": {
+            "type": "string",
+            "description": "Alternative to session_id — target a specific VM by ID. Exactly one of session_id or vm_id must be provided."
+          },
+          "path": {
+            "type": "string",
+            "description": "Absolute destination path inside the VM.",
+            "examples": ["/opt/app/config.json", "/home/user/run.sh"]
+          },
+          "content": {
+            "type": "string",
+            "description": "File content. For binary files use encoding: base64."
+          },
+          "encoding": {
+            "type": "string",
+            "description": "Encoding of the content field.",
+            "default": "utf-8",
+            "enum": ["utf-8", "base64"]
+          },
+          "mode": {
+            "type": "string",
+            "description": "Unix file permission mode string.",
+            "default": "0644",
+            "pattern": "^0[0-7]{3}$"
+          }
+        },
+        "required": ["path", "content"],
+        "oneOf": [
+          { "required": ["session_id"] },
+          { "required": ["vm_id"] }
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "path":       { "type": "string" },
+          "bytes":      { "type": "integer", "description": "Number of bytes written." },
+          "mode":       { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "required": ["path", "bytes"]
+      },
+      "errors": { "$ref": "#/shared_definitions/error_result" },
+      "examples": [
+        {
+          "description": "Inject a config file into a session",
+          "input": {
+            "session_id": "sess-abc123de",
+            "path": "/opt/app/config.json",
+            "content": "{\"debug\": true, \"port\": 3000}",
+            "mode": "0644"
+          }
+        },
+        {
+          "description": "Write and chmod a shell script",
+          "input": {
+            "session_id": "sess-abc123de",
+            "path": "/home/user/setup.sh",
+            "content": "#!/bin/bash\napt-get install -y build-essential",
+            "mode": "0755"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "microvm_file_read",
+      "description": "Read the contents of a file from inside a VM or session and return it as a string. For binary files, returns base64-encoded content.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "session_id": { "$ref": "#/shared_definitions/session_id" },
+          "vm_id":      { "type": "string" },
+          "path": {
+            "type": "string",
+            "description": "Absolute path to the file inside the VM."
+          },
+          "encoding": {
+            "type": "string",
+            "default": "utf-8",
+            "enum": ["utf-8", "base64"]
+          },
+          "max_bytes": {
+            "type": "integer",
+            "description": "Maximum bytes to return. If the file is larger, it is truncated and truncated: true is set in the response.",
+            "default": 1048576,
+            "maximum": 10485760
+          }
+        },
+        "required": ["path"],
+        "oneOf": [
+          { "required": ["session_id"] },
+          { "required": ["vm_id"] }
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "path":      { "type": "string" },
+          "content":   { "type": "string", "description": "File contents (UTF-8 string or base64 depending on encoding parameter)." },
+          "bytes":     { "type": "integer" },
+          "encoding":  { "type": "string" },
+          "truncated": { "type": "boolean", "description": "True if max_bytes was reached and the file was truncated." },
+          "mode":      { "type": "string" },
+          "modified_at": { "type": "string", "format": "date-time" }
+        },
+        "required": ["path", "content", "bytes"]
+      },
+      "errors": { "$ref": "#/shared_definitions/error_result" }
+    },
+
+    {
+      "name": "microvm_snapshot_create",
+      "description": "Create a named snapshot of the current VM disk state. Snapshots are available as base images for future microvm_run or microvm_session_create calls via snapshot:<name>. Useful for capturing expensive setup steps.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "session_id": { "$ref": "#/shared_definitions/session_id" },
+          "vm_id":      { "type": "string" },
+          "name": {
+            "type": "string",
+            "description": "Unique name for this snapshot.",
+            "pattern": "^[a-zA-Z0-9_-]{1,128}$"
+          },
+          "description": {
+            "type": "string",
+            "description": "Human-readable description stored with the snapshot.",
+            "maxLength": 512
+          },
+          "tags": { "$ref": "#/shared_definitions/tags" }
+        },
+        "required": ["name"],
+        "oneOf": [
+          { "required": ["session_id"] },
+          { "required": ["vm_id"] }
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "snapshot_id":   { "type": "string" },
+          "name":          { "type": "string" },
+          "image_ref":     { "type": "string", "description": "Pass this as the image field in microvm_run to boot from this snapshot (e.g. snapshot:my-snap)." },
+          "size_mb":       { "type": "integer" },
+          "created_at":    { "type": "string", "format": "date-time" }
+        },
+        "required": ["snapshot_id", "name", "image_ref"]
+      },
+      "errors": { "$ref": "#/shared_definitions/error_result" }
+    },
+
+    {
+      "name": "microvm_snapshot_list",
+      "description": "Enumerate all available snapshots, optionally filtered by tags or base image.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "base_image": {
+            "type": "string",
+            "description": "Filter to only snapshots derived from this base image."
+          },
+          "tags": { "$ref": "#/shared_definitions/tags" }
+        },
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "snapshots": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "snapshot_id":  { "type": "string" },
+                "name":         { "type": "string" },
+                "image_ref":    { "type": "string" },
+                "base_image":   { "type": "string" },
+                "size_mb":      { "type": "integer" },
+                "description":  { "type": ["string", "null"] },
+                "created_at":   { "type": "string", "format": "date-time" },
+                "tags":         { "$ref": "#/shared_definitions/tags" }
+              }
+            }
+          },
+          "total": { "type": "integer" }
+        },
+        "required": ["snapshots", "total"]
+      }
+    },
+
+    {
+      "name": "microvm_snapshot_delete",
+      "description": "Permanently delete a snapshot by name or ID.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "description": "Snapshot ID to delete. Exactly one of snapshot_id or name must be provided."
+          },
+          "name": {
+            "type": "string",
+            "description": "Snapshot name to delete."
+          }
+        },
+        "oneOf": [
+          { "required": ["snapshot_id"] },
+          { "required": ["name"] }
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "deleted":      { "type": "boolean" },
+          "snapshot_id":  { "type": "string" },
+          "freed_mb":     { "type": "integer" }
+        },
+        "required": ["deleted"]
+      },
+      "errors": { "$ref": "#/shared_definitions/error_result" }
+    },
+
+    {
+      "name": "microvm_image_list",
+      "description": "Return all base images available on the micro-VM host, including OS metadata, disk size, and available architecture.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "os_filter": {
+            "type": "string",
+            "description": "Filter results by OS family (e.g. ubuntu, debian, alpine)."
+          },
+          "arch_filter": {
+            "type": "string",
+            "description": "Filter by CPU architecture.",
+            "enum": ["x86_64", "aarch64"]
+          }
+        },
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name":          { "type": "string", "description": "Pass this as the image field in other tools." },
+                "display_name":  { "type": "string" },
+                "os":            { "type": "string" },
+                "os_version":    { "type": "string" },
+                "arch":          { "type": "string" },
+                "size_mb":       { "type": "integer" },
+                "created_at":    { "type": "string", "format": "date-time" },
+                "is_snapshot":   { "type": "boolean" },
+                "tags":          { "$ref": "#/shared_definitions/tags" }
+              }
+            }
+          },
+          "total": { "type": "integer" }
+        },
+        "required": ["images", "total"]
+      }
+    },
+
+    {
+      "name": "microvm_port_forward",
+      "description": "Expose a TCP port from inside a running session to the host, returning an externally accessible URL. Useful for testing HTTP services, APIs, or databases running inside the VM.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "session_id":  { "$ref": "#/shared_definitions/session_id" },
+          "vm_port": {
+            "type": "integer",
+            "description": "The TCP port inside the VM to expose.",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "protocol": {
+            "type": "string",
+            "description": "Network protocol.",
+            "default": "tcp",
+            "enum": ["tcp", "udp"]
+          },
+          "ttl_seconds": {
+            "type": "integer",
+            "description": "How long the forwarding rule stays active. Defaults to the session lifetime.",
+            "minimum": 10,
+            "maximum": 86400
+          }
+        },
+        "required": ["session_id", "vm_port"],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "host_port":   { "type": "integer",  "description": "Mapped host-side TCP port." },
+          "host_url":    { "type": "string",   "description": "Full URL if the host supports reverse proxy tunneling (e.g. http://vm-abc123.local:8080)." },
+          "vm_port":     { "type": "integer" },
+          "expires_at":  { "type": "string",   "format": "date-time" }
+        },
+        "required": ["host_port", "vm_port"]
+      },
+      "errors": { "$ref": "#/shared_definitions/error_result" }
+    },
+
+    {
+      "name": "microvm_resource_usage",
+      "description": "Return real-time CPU, RAM, and disk utilisation for a running session or VM.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "session_id": { "$ref": "#/shared_definitions/session_id" },
+          "vm_id":      { "type": "string" }
+        },
+        "oneOf": [
+          { "required": ["session_id"] },
+          { "required": ["vm_id"] }
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "session_id":      { "type": ["string", "null"] },
+          "vm_id":           { "type": "string" },
+          "cpu_usage_pct":   { "type": "number",  "description": "Aggregate CPU usage across all vCPUs as a percentage." },
+          "ram_used_mb":     { "type": "integer", "description": "RSS memory used by VM processes in MB." },
+          "ram_total_mb":    { "type": "integer" },
+          "disk_used_mb":    { "type": "integer", "description": "Disk space consumed by the VM's overlay layer (delta from base image)." },
+          "disk_total_mb":   { "type": "integer" },
+          "uptime_seconds":  { "type": "integer" },
+          "sampled_at":      { "type": "string", "format": "date-time" }
+        },
+        "required": ["vm_id", "cpu_usage_pct", "ram_used_mb", "disk_used_mb"]
+      },
+      "errors": { "$ref": "#/shared_definitions/error_result" }
+    },
+
+    {
+      "name": "microvm_process_list",
+      "description": "Return a snapshot of running processes inside a VM or session, similar to 'ps aux'. Useful for verifying background services started correctly.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "session_id":     { "$ref": "#/shared_definitions/session_id" },
+          "vm_id":          { "type": "string" },
+          "filter_user": {
+            "type": "string",
+            "description": "Only return processes owned by this username."
+          },
+          "filter_name": {
+            "type": "string",
+            "description": "Only return processes whose command contains this string."
+          }
+        },
+        "oneOf": [
+          { "required": ["session_id"] },
+          { "required": ["vm_id"] }
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "processes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "pid":       { "type": "integer" },
+                "user":      { "type": "string" },
+                "cpu_pct":   { "type": "number" },
+                "mem_pct":   { "type": "number" },
+                "command":   { "type": "string" },
+                "started_at": { "type": "string", "format": "date-time" }
+              }
+            }
+          },
+          "total": { "type": "integer" }
+        },
+        "required": ["processes", "total"]
+      },
+      "errors": { "$ref": "#/shared_definitions/error_result" }
+    },
+
+    {
+      "name": "microvm_log_tail",
+      "description": "Retrieve the most recent lines from a session's execution log. Useful for debugging timeouts or inspecting output from long-running background processes.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "session_id": { "$ref": "#/shared_definitions/session_id" },
+          "vm_id":      { "type": "string" },
+          "logfile": {
+            "type": "string",
+            "description": "Specific logfile path on the host to tail. If omitted, tails the primary session log."
+          },
+          "lines": {
+            "type": "integer",
+            "description": "Number of lines to return from the end of the log.",
+            "default": 100,
+            "minimum": 1,
+            "maximum": 5000
+          }
+        },
+        "oneOf": [
+          { "required": ["session_id"] },
+          { "required": ["vm_id"] }
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "logfile":     { "type": "string" },
+          "lines":       { "type": "array", "items": { "type": "string" } },
+          "total_lines": { "type": "integer" },
+          "truncated":   { "type": "boolean" }
+        },
+        "required": ["logfile", "lines"]
+      },
+      "errors": { "$ref": "#/shared_definitions/error_result" }
+    },
+
+    {
+      "name": "microvm_fs_diff",
+      "description": "Return a list of filesystem paths that have been created, modified, or deleted inside a VM relative to the base image. Useful for auditing what a command changed, or preparing to snapshot only relevant changes.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "session_id": { "$ref": "#/shared_definitions/session_id" },
+          "vm_id":      { "type": "string" },
+          "path_prefix": {
+            "type": "string",
+            "description": "If provided, only return changes under this directory prefix.",
+            "examples": ["/opt/app", "/etc"]
+          }
+        },
+        "oneOf": [
+          { "required": ["session_id"] },
+          { "required": ["vm_id"] }
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "changes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path":   { "type": "string" },
+                "change": { "type": "string", "enum": ["added", "modified", "deleted"] },
+                "size_bytes": { "type": ["integer", "null"] }
+              },
+              "required": ["path", "change"]
+            }
+          },
+          "total_added":    { "type": "integer" },
+          "total_modified": { "type": "integer" },
+          "total_deleted":  { "type": "integer" }
+        },
+        "required": ["changes"]
+      },
+      "errors": { "$ref": "#/shared_definitions/error_result" }
+    },
+
+    {
+      "name": "microvm_gc",
+      "description": "Garbage-collect stale sessions and ephemeral VMs matching the given criteria. Designed for use by orchestrators or agent supervisors to reclaim resources after a task batch completes.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tags": {
+            "$ref": "#/shared_definitions/tags",
+            "description": "Destroy all sessions/VMs matching ALL of these tags."
+          },
+          "older_than_seconds": {
+            "type": "integer",
+            "description": "Destroy all sessions/VMs created more than this many seconds ago.",
+            "minimum": 0
+          },
+          "status_filter": {
+            "type": "array",
+            "description": "Only GC sessions in these states.",
+            "items": { "type": "string", "enum": ["idle", "expired", "error"] },
+            "default": ["expired", "error"]
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "If true, return what would be destroyed without actually destroying anything.",
+            "default": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "destroyed_sessions": { "type": "array", "items": { "type": "string" } },
+          "total_destroyed":    { "type": "integer" },
+          "freed_ram_mb":       { "type": "integer" },
+          "dry_run":            { "type": "boolean" }
+        },
+        "required": ["destroyed_sessions", "total_destroyed", "dry_run"]
+      },
+      "errors": { "$ref": "#/shared_definitions/error_result" }
+    }
+
+  ],
+
+  "tool_summary": {
+    "execution": [
+      "microvm_run",
+      "microvm_run_script",
+      "microvm_session_exec"
+    ],
+    "session_lifecycle": [
+      "microvm_session_create",
+      "microvm_session_destroy",
+      "microvm_session_list"
+    ],
+    "file_operations": [
+      "microvm_file_write",
+      "microvm_file_read"
+    ],
+    "snapshots": [
+      "microvm_snapshot_create",
+      "microvm_snapshot_list",
+      "microvm_snapshot_delete"
+    ],
+    "images": [
+      "microvm_image_list"
+    ],
+    "networking": [
+      "microvm_port_forward"
+    ],
+    "observability": [
+      "microvm_resource_usage",
+      "microvm_process_list",
+      "microvm_log_tail",
+      "microvm_fs_diff"
+    ],
+    "maintenance": [
+      "microvm_gc"
+    ]
+  }
+}

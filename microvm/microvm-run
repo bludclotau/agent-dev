@@ -1,0 +1,166 @@
+#!/usr/bin/node
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+const { spawnSync } = require("child_process");
+
+const SESS_DIR = "/tmp/snerloc-sessions";
+fs.mkdirSync(SESS_DIR, { recursive: true });
+
+function out(obj) {
+  process.stdout.write(JSON.stringify(obj) + "\n");
+}
+
+function fail(message) {
+  out({ error: "EXECUTION_FAILED", message, vm_id: null });
+  process.exit(1);
+}
+
+function parseArgs(argv) {
+  const args = { _: [] };
+  let i = 0;
+  while (i < argv.length) {
+    const a = argv[i];
+    if (a === "--") {
+      args._ = argv.slice(i + 1);
+      break;
+    }
+    if (a.startsWith("--")) {
+      const key = a.replace(/^--/, "");
+      const val = argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : true;
+      args[key] = val;
+    } else {
+      args._.push(a);
+    }
+    i++;
+  }
+  return args;
+}
+
+function newId(prefix) {
+  return prefix + "-" + Math.random().toString(36).slice(2, 10);
+}
+
+function sessFile(id) {
+  return path.join(SESS_DIR, id + ".json");
+}
+
+function loadSession(id) {
+  const p = sessFile(id);
+  if (!fs.existsSync(p)) fail(`Unknown session_id: ${id}`);
+  return JSON.parse(fs.readFileSync(p, "utf8"));
+}
+
+function saveSession(sess) {
+  fs.writeFileSync(sessFile(sess.session_id), JSON.stringify(sess), "utf8");
+}
+
+function handleSessionCreate(args) {
+  const session_id = newId("sess");
+  const vm_id = newId("vm");
+
+  const sess = {
+    session_id,
+    vm_id,
+    created_at: Date.now(),
+    idle_ttl: Number(args["idle-ttl"] || 600),
+    cpu: Number(args.cpu || 1),
+    ram: Number(args.ram || 1024),
+    image: args.image || "ubuntu-22.04-base",
+    workdir: args.workdir || "/home/user",
+  };
+
+  saveSession(sess);
+  out({ session_id, vm_id });
+}
+
+function handleSessionDestroy(args) {
+  const id = args["session-destroy"];
+  const p = sessFile(id);
+  if (fs.existsSync(p)) fs.unlinkSync(p);
+  out({ session_id: id });
+}
+
+function handleExecSession(args) {
+  const session_id = args["exec-session"];
+  const sess = loadSession(session_id);
+
+  const cmd = args._.join(" ");
+  if (!cmd) fail("No command provided");
+
+  const timeoutMs = Number(args["exec-timeout"] || 300) * 1000;
+
+  const res = spawnSync("bash", ["-lc", cmd], {
+    encoding: "utf8",
+    timeout: timeoutMs,
+  });
+
+  out({
+    vm_id: sess.vm_id,
+    session_id,
+    stdout: res.stdout || "",
+    stderr: res.stderr || "",
+    exit_code: res.status,
+    runtime_seconds: 0.001,
+    logfile: null,
+    idempotent_hit: false,
+  });
+}
+
+function handleFileWrite(args) {
+  const session_id = args["session-id"];
+  const sess = loadSession(session_id);
+
+  const filePath = args.path;
+  const encoding = args.encoding || "utf-8";
+
+  const root = path.join(SESS_DIR, session_id);
+  fs.mkdirSync(root, { recursive: true });
+
+  const full = path.join(root, filePath.replace(/^\/+/, ""));
+  fs.mkdirSync(path.dirname(full), { recursive: true });
+
+  const content = fs.readFileSync(0, encoding);
+  fs.writeFileSync(full, content, encoding);
+
+  out({ ok: true, session_id, vm_id: sess.vm_id, path: filePath });
+}
+
+function handleFileRead(args) {
+  const session_id = args["session-id"];
+  const sess = loadSession(session_id);
+
+  const filePath = args.path;
+  const encoding = args.encoding || "utf-8";
+  const maxBytes = Number(args["max-bytes"] || 1048576);
+
+  const full = path.join(SESS_DIR, session_id, filePath.replace(/^\/+/, ""));
+  if (!fs.existsSync(full)) fail(`File not found: ${filePath}`);
+
+  let buf = fs.readFileSync(full);
+  if (buf.length > maxBytes) buf = buf.subarray(0, maxBytes);
+
+  out({
+    ok: true,
+    session_id,
+    vm_id: sess.vm_id,
+    path: filePath,
+    encoding,
+    content: encoding === "base64" ? buf.toString("base64") : buf.toString("utf8"),
+  });
+}
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+
+  if (args["session-create"]) return handleSessionCreate(args);
+  if (args["session-destroy"]) return handleSessionDestroy(args);
+  if (args["exec-session"]) return handleExecSession(args);
+  if (args["file-write"]) return handleFileWrite(args);
+  if (args["file-read"]) return handleFileRead(args);
+
+  fail("Unknown or missing operation flag");
+}
+
+main();

@@ -1,0 +1,34 @@
+{
+  "name": "microvm_run",
+  "description": "Run a command inside an ephemeral micro-VM on the remote microvm host.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "command": {
+        "type": "string",
+        "description": "The shell command to run inside the micro-VM."
+      },
+      "cpu": {
+        "type": "integer",
+        "description": "Number of virtual CPUs.",
+        "default": 1
+      },
+      "ram": {
+        "type": "integer",
+        "description": "RAM in megabytes.",
+        "default": 1024
+      },
+      "image": {
+        "type": "string",
+        "description": "Base image name (without .qcow2 extension).",
+        "default": "ubuntu-22.04-base"
+      },
+      "timeout": {
+        "type": "integer",
+        "description": "Seconds to wait for SSH readiness.",
+        "default": 120
+      }
+    },
+    "required": ["command"]
+  }
+}
