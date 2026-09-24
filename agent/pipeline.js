@@ -3,6 +3,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import pg from "pg";
 import { DATABASE_URL, PERSONA, PUBLISH_URL } from "./config.js";
+import { pace } from "./pace.js";
 import { runInSandbox } from "./sandbox.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -42,6 +43,44 @@ export function resolvePublish(slug, allowlist = loadAllowlist()) {
   return filename;
 }
 
+export function looksLikeHomepage(url, snapshot = "") {
+  let pathname = "/";
+  try {
+    pathname = new URL(url).pathname.replace(/\/+$/, "") || "/";
+  } catch {
+    return false;
+  }
+  if (pathname === "/" || pathname === "/index.html" || pathname === "/index.php") return true;
+  const head = String(snapshot).split("\n").slice(0, 40);
+  const featured = head.filter((line) => /heading |link /i.test(line));
+  return featured.length >= 6;
+}
+
+const CHROME_LABELS = new Set([
+  "news", "iview", "listen", "search", "menu", "login", "just in", "for you",
+  "politics", "world", "business", "abc news",
+]);
+
+function lineLabel(line) {
+  const quoted = String(line).match(/"([^"]+)"/);
+  return quoted ? quoted[1].trim() : "";
+}
+
+export function extractFeatured(snapshot) {
+  const picked = [];
+  const lines = String(snapshot || "").split("\n");
+  for (let i = 0; i < lines.length && i < 140 && picked.length < 8; i += 1) {
+    const line = lines[i].trim();
+    if (!/heading |link /i.test(line)) continue;
+    if (/skip to/i.test(line)) continue;
+    const label = lineLabel(line);
+    if (!label || CHROME_LABELS.has(label.toLowerCase())) continue;
+    if (/^link /i.test(line) && label.length < 16 && !label.includes(" ")) continue;
+    picked.push(line);
+  }
+  return picked.join("\n");
+}
+
 function browserCommand(url, mode) {
   const quoted = shellQuote(checkUrl(url));
   const bin = process.env.AGENT_BROWSER_BIN || "/usr/local/bin/agent-browser";
@@ -52,6 +91,7 @@ function browserCommand(url, mode) {
 }
 
 export async function findPage(args, deps = {}) {
+  await pace(deps);
   const run = deps.run || runInSandbox;
   const url = args.url
     ? checkUrl(args.url)
@@ -64,11 +104,23 @@ export async function findPage(args, deps = {}) {
 }
 
 export async function readPage(args, deps = {}) {
+  await pace(deps);
   const run = deps.run || runInSandbox;
   const url = checkUrl(args.url);
-  const command = browserCommand(url, "read");
-  const result = await run(command);
-  return { ok: Boolean(result.ok), url, stdout: result.stdout || "", error: result.error || null };
+  const probe = await run(browserCommand(url, "find"));
+  const homepage = looksLikeHomepage(url, probe.stdout || "");
+  if (homepage) {
+    const featured = extractFeatured(probe.stdout || "");
+    return {
+      ok: Boolean(probe.ok) && Boolean(featured),
+      url,
+      homepage: true,
+      stdout: featured || probe.stdout || "",
+      error: probe.error || null,
+    };
+  }
+  const result = await run(browserCommand(url, "read"));
+  return { ok: Boolean(result.ok), url, homepage: false, stdout: result.stdout || "", error: result.error || null };
 }
 
 export async function saveToDb(args, deps = {}) {
@@ -81,11 +133,22 @@ export async function saveToDb(args, deps = {}) {
   const pool = new pg.Pool({ connectionString });
   try {
     await pool.query(SCHEMA);
+    await pool.query("ALTER TABLE findings ADD COLUMN IF NOT EXISTS asked TEXT");
+    await pool.query("ALTER TABLE findings ADD COLUMN IF NOT EXISTS found TEXT");
+    await pool.query("ALTER TABLE findings ADD COLUMN IF NOT EXISTS published TEXT");
     const saved = await pool.query(
-      `INSERT INTO findings (persona, source_url, title, content)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO findings (persona, source_url, title, content, asked, found, published)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id`,
-      [PERSONA, url, title, content.slice(0, 20000)],
+      [
+        PERSONA,
+        url,
+        title,
+        content.slice(0, 20000),
+        args.asked ? String(args.asked).slice(0, 2000) : null,
+        args.found ? String(args.found).slice(0, 4000) : null,
+        args.published ? String(args.published).slice(0, 500) : null,
+      ],
     );
     return { ok: true, id: Number(saved.rows[0].id) };
   } finally {

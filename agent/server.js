@@ -1,6 +1,7 @@
 import http from "http";
 import { timingSafeEqual } from "crypto";
 import { decide, listPending } from "./approvals.js";
+import { runChatChain } from "./chain.js";
 import { ensureFragments } from "./fragments.js";
 
 function authorized(req) {
@@ -12,6 +13,21 @@ function authorized(req) {
   const a = Buffer.from(provided);
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString() || "{}"));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on("error", reject);
+  });
 }
 
 function send(res, status, body) {
@@ -26,6 +42,11 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "GET" && url.pathname === "/pending") {
       return send(res, 200, { pending: await listPending() });
+    }
+    if (req.method === "POST" && url.pathname === "/pipeline") {
+      const body = await readBody(req);
+      if (!body.url) return send(res, 400, { error: "url is required" });
+      return send(res, 200, await runChatChain({ prompt: body.prompt || body.url, url: body.url }));
     }
     const match = url.pathname.match(/^\/pending\/(\d+)\/(approve|reject)$/);
     if (req.method === "POST" && match) {

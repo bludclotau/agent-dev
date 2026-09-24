@@ -4,7 +4,10 @@ CREATE TABLE IF NOT EXISTS findings (
     source_url TEXT,
     title TEXT,
     content TEXT NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    asked TEXT,
+    found TEXT,
+    published TEXT
 );
 
 CREATE INDEX IF NOT EXISTS findings_persona_created_idx
