@@ -1,0 +1,14 @@
+[Unit]
+Description=Wendy local PHP publisher
+After=network.target
+
+[Service]
+User=wendy
+WorkingDirectory=/home/wendy/waffle_house/agent-dev/site
+EnvironmentFile=-/etc/wendy/publish.env
+ExecStart=/usr/bin/php -S 127.0.0.1:8091 -t /home/wendy/waffle_house/agent-dev/site
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

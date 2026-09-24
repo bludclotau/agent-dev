@@ -7,9 +7,7 @@ export const PLAN_TOOLS = [
   "done",
 ];
 
-export const TOOL_GRAMMAR = String.raw`
-root ::= "{" ws "\"tool\"" ws ":" ws toolname ws "," ws "\"args\"" ws ":" ws object ws "}"
-toolname ::= "\"find_page\"" | "\"read_page\"" | "\"save_to_db\"" | "\"publish_to_site\"" | "\"done\""
+const GRAMMAR_TAIL = String.raw`
 object ::= "{" ws "}" | "{" ws members ws "}"
 members ::= pair (ws "," ws pair)*
 pair ::= string ws ":" ws string
@@ -20,7 +18,19 @@ hex ::= [0-9a-fA-F]
 ws ::= [ \t\n]*
 `.trim();
 
-export function parseCall(raw) {
+export function grammarFor(tools) {
+  const names = PLAN_TOOLS.filter((name) => new Set([...(tools || []), "done"]).has(name));
+  const toolname = names.map((name) => `"\\"${name}\\""`).join(" | ");
+  return [
+    String.raw`root ::= "{" ws "\"tool\"" ws ":" ws toolname ws "," ws "\"args\"" ws ":" ws object ws "}"`,
+    `toolname ::= ${toolname}`,
+    GRAMMAR_TAIL,
+  ].join("\n");
+}
+
+export const TOOL_GRAMMAR = grammarFor(PLAN_TOOLS);
+
+export function parseCall(raw, allowed = PLAN_TOOLS) {
   let call;
   try {
     call = JSON.parse(raw);
@@ -29,6 +39,8 @@ export function parseCall(raw) {
   }
   const tool = call.tool;
   const args = call.args && typeof call.args === "object" && !Array.isArray(call.args) ? call.args : {};
-  if (!PLAN_TOOLS.includes(tool)) throw new Error(`planner chose ${tool}`);
+  const permit = new Set(allowed);
+  permit.add("done");
+  if (!permit.has(tool)) throw new Error(`planner chose ${tool}`);
   return { tool, args };
 }
