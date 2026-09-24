@@ -18,6 +18,14 @@ Still limited:
 
 `prompt_fragments` holds the sentences that used to be hardcoded in `agent/llm.js`. Coarse rows tagged `core` are always included. A fine row is included when one of its tags is a word in the goal. If no fine row matches, every fine row is included so a vague goal still has the full pipeline. The allowed-tool line, the goal, and the previous-step trace are still assembled in code. The GBNF `toolname` line is generated from the tools on the selected fragments. `done` is always allowed.
 
+## Chat trigger
+
+A URL in a `/route` message is enough for gguf-router to ack immediately and call `POST /pipeline` on this service. The chain is find, homepage-aware read, an experience row in `findings` (`asked`, `found`, `published`), then a pending publish. It does not publish until Keyhole approves. Chat with no URL is unchanged. Keyhole's Chat tab now sends through `/route` unless the box is unchecked.
+
+Tried from `/route` with `https://www.abc.net.au/`. The ack came back in about 0.05s: "let me take a look, one sec". The follow-up named the Top Stories heading, including "'Need exact data urgently': OpenAI agents plotted to access government data", and left publish #3 waiting for approval at `http://127.0.0.1:8091/pages/index.php`. A prompt with no URL still returned a normal completion and was not dispatched.
+
+Page fetches wait a jittered few seconds, and a second page step waits again.
+
 ## Show and tell
 
 Keyhole's Wendy tab reads `GET /api/wendy/pending`. Each card shows the proposed slug, title, and body, plus the find/read steps stored on the row. Approve posts to the existing `publish.php` allowlist. Reject only marks the row. The env var `WENDY_CONFIRM` is no longer the gate.
