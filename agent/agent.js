@@ -1,54 +1,25 @@
-// /opt/snerloc/agent/agent.js
-import readline from "readline";
-import { askLLM } from "./llm.js";
-import { executeTool } from "./tools.js";
+import { plan } from "./planner.js";
+import { supervise } from "./supervisor.js";
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout
-});
-
-async function main() {
-  let messages = [];
-
-  while (true) {
-    const userInput = await new Promise(resolve =>
-      rl.question(">>> ", resolve)
-    );
-
-    messages.push({ role: "user", content: userInput });
-
-    let llmResponse = await askLLM(messages);
-
-    // Strip markdown fences
-    let cleaned = llmResponse
-      .replace(/```json/gi, "")
-      .replace(/```/g, "")
-      .trim();
-
-    let toolCall = null;
-
-    try {
-      toolCall = JSON.parse(cleaned);
-    } catch {
-      console.log(llmResponse);
-      messages.push({ role: "assistant", content: llmResponse });
-      continue;
-    }
-
-    if (toolCall.command) {
-      console.log(`Executing tool: ${toolCall.command}`);
-
-      const result = await executeTool(toolCall);
-      const resultText = JSON.stringify(result, null, 2);
-
-      messages.push({ role: "assistant", content: resultText });
-      console.log(resultText);
-    } else {
-      console.log(llmResponse);
-      messages.push({ role: "assistant", content: llmResponse });
-    }
-  }
+export async function runWendy(goal, opts = {}) {
+  return supervise(() => plan(goal, opts), {
+    restarts: opts.restarts ?? 1,
+    onCrash: opts.onCrash,
+  });
 }
 
-main();
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const goal = process.argv.slice(2).join(" ") || "Find https://example.com, read it, and stop.";
+  runWendy(goal, {
+    confirm: async (call) => {
+      process.stderr.write(`confirm ${call.tool} ${JSON.stringify(call.args.slug || "")}? set WENDY_CONFIRM=yes\n`);
+      return process.env.WENDY_CONFIRM === "yes";
+    },
+  }).then((result) => {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    if (!result.ok) process.exitCode = 1;
+  }).catch((err) => {
+    process.stderr.write(`${err.stack || err.message}\n`);
+    process.exitCode = 1;
+  });
+}

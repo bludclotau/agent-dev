@@ -1,3 +1,4 @@
+// UNUSED by Wendy. The model cannot call remote_shell. See ../UNUSED.md.
 import { execFile } from "child_process";
 
 export async function remote_shell({ command, confirmed = false, target = "" }) {
