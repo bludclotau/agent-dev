@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { PLAN_TOOLS, TOOL_GRAMMAR, parseCall } from "../grammar.js";
+import { PLAN_TOOLS, TOOL_GRAMMAR, grammarFor, parseCall } from "../grammar.js";
+import { SEED, selectFragments, toolsFor } from "../fragments.js";
 import { resolvePublish, shellQuote, checkUrl } from "../pipeline.js";
 import { plan } from "../planner.js";
 import { supervise } from "../supervisor.js";
@@ -32,21 +33,40 @@ test("page commands stay quoted inside the sandbox", () => {
   assert.throws(() => checkUrl("https://user:secret@example.com"));
 });
 
-test("publish waits for confirmation", async () => {
+test("a read task drops publish from the grammar", () => {
+  const tools = toolsFor(selectFragments("read https://example.com", SEED));
+  assert.deepEqual(tools, ["find_page", "read_page", "done"]);
+  assert.doesNotMatch(grammarFor(tools), /publish_to_site/);
+  assert.doesNotMatch(grammarFor(tools), /save_to_db/);
+});
+
+test("a task that names every step keeps the five tools", () => {
+  const tools = toolsFor(selectFragments("find the page, read it, save the content, and publish the slug", SEED));
+  assert.deepEqual(tools, PLAN_TOOLS);
+});
+
+test("publish is queued for a person and is not executed", async () => {
   const calls = [];
+  const pending = [];
   const result = await plan("publish the note", {
     maxSteps: 2,
+    fragments: SEED,
     complete: async () => JSON.stringify({
       tool: "publish_to_site",
       args: { slug: "notes", title: "Hi", body: "There" },
     }),
-    confirm: async () => false,
+    recordPending: async (row) => {
+      pending.push(row);
+      return { id: 7 };
+    },
     execute: async (call) => {
       calls.push(call.tool);
       return { ok: true };
     },
   });
-  assert.equal(result.error, "confirmation denied");
+  assert.equal(result.pending, true);
+  assert.equal(result.id, 7);
+  assert.equal(pending[0].tool, "publish_to_site");
   assert.deepEqual(calls, []);
 });
 

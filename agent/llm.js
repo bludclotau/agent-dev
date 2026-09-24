@@ -1,22 +1,12 @@
 import { LLM_COMPLETION_URL } from "./config.js";
-import { PLAN_TOOLS, TOOL_GRAMMAR } from "./grammar.js";
+import { TOOL_GRAMMAR } from "./grammar.js";
+import { SEED, assemblePrompt, selectFragments } from "./fragments.js";
 
-export function buildPrompt(goal, steps) {
-  const history = JSON.stringify(steps).slice(0, 6000);
-  return [
-    "You are Wendy. You find a page, read it, save the useful part, and publish only when asked.",
-    `Goal: ${goal}`,
-    `Allowed tools: ${PLAN_TOOLS.join(", ")}.`,
-    "find_page takes query or url. read_page takes url. save_to_db takes url, title, and content.",
-    "publish_to_site takes slug, title, and body. slug is a name from the allowlist, not a filesystem path.",
-    "When the goal is finished, call done with args text set to a short answer.",
-    `Previous steps: ${history}`,
-    "Reply with one JSON object.",
-    "Assistant:",
-  ].join("\n");
+export function buildPrompt(goal, steps, fragments = SEED) {
+  return assemblePrompt(selectFragments(goal, fragments), goal, steps);
 }
 
-export async function complete(prompt, { fetchImpl = fetch, timeoutMs = 90000 } = {}) {
+export async function complete(prompt, { grammar = TOOL_GRAMMAR, fetchImpl = fetch, timeoutMs = 90000 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -27,7 +17,7 @@ export async function complete(prompt, { fetchImpl = fetch, timeoutMs = 90000 } 
         prompt,
         n_predict: 180,
         temperature: 0,
-        grammar: TOOL_GRAMMAR,
+        grammar,
       }),
       signal: controller.signal,
     });

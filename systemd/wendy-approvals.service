@@ -1,0 +1,18 @@
+[Unit]
+Description=Wendy pending-approval API for Keyhole
+After=network.target postgresql.service
+
+[Service]
+User=wendy
+WorkingDirectory=/home/wendy/waffle_house/agent-dev/agent
+Environment=WENDY_API_PORT=8790
+Environment=PUBLISH_URL=http://127.0.0.1:8091/publish.php
+EnvironmentFile=/home/wendy/waffle_house/gguf-router/.env
+EnvironmentFile=-/etc/gguf-router/tool.env
+EnvironmentFile=-/etc/wendy/publish.env
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
